@@ -22,16 +22,19 @@ import org.springframework.ide.vscode.boot.java.livehover.v2.LiveRequestMapping;
 import org.springframework.ide.vscode.boot.java.livehover.v2.SpringProcessLiveData;
 
 /**
- * Puts the API version of a versioned request mapping into the path of a live URL when the
+ * The paths of a live request mapping, with the API version of the mapping put into the path when the
  * application uses path segment based API versioning (<code>usePathSegment(int)</code> or
  * <code>spring.mvc|webflux.apiversion.use.path-segment</code>), so that a mapping like
  * <code>/{version}/greeting</code> with <code>version = "1.1"</code> links to <code>/1.1/greeting</code>.
+ * <p>
+ * The index of the version path segment is taken from the properties of the running app and, if not
+ * available there, from the given web configs of the project.
  *
  * @author Seonwoo Jung
  */
-public class ApiVersionPathSegment {
+public class VersionedPaths {
 
-	static final String STRATEGY_PREFIX = "Path Segment: ";
+	private static final String STRATEGY_PREFIX = "Path Segment: ";
 
 	private static final List<String> PATH_SEGMENT_PROPERTIES = List.of(
 			"spring.mvc.apiversion.use.path-segment",
@@ -40,24 +43,67 @@ public class ApiVersionPathSegment {
 	// a URI variable like {version} or {version:\d+}, but not a capturing pattern like {*path}
 	private static final Pattern URI_VARIABLE = Pattern.compile("\\{[^*/{}][^/]*\\}");
 
+	private final LiveRequestMapping mapping;
+	private final SpringProcessLiveData liveData;
+	private final Collection<WebConfigIndexElement> webConfigs;
+
+	private Integer pathSegmentIndex;
+	private boolean pathSegmentIndexComputed;
+
 	/**
-	 * @return the path with the API version of the mapping put into the version path segment,
+	 * @param webConfigs the web configs of the project (from java config and properties), empty if no project is at hand
+	 */
+	public VersionedPaths(LiveRequestMapping mapping, SpringProcessLiveData liveData, Collection<WebConfigIndexElement> webConfigs) {
+		this.mapping = mapping;
+		this.liveData = liveData;
+		this.webConfigs = webConfigs == null ? List.of() : webConfigs;
+	}
+
+	/**
+	 * @return the paths of the mapping as reported by the running app, <code>""</code> if the path is unconstrained
+	 */
+	public String[] getSplitPath() {
+		String[] paths = mapping.getSplitPath();
+		if (paths == null || paths.length == 0) {
+			//Technically, this means the path 'predicate' is unconstrained, meaning any path matches.
+			//So this is not quite the same as the case where path=""... but...
+			//It is better for us to show one link where any path is allowed, versus showing no links where any link is allowed.
+			//So we'll pretend this is the same as path="" as that gives a working link.
+			return new String[] {""};
+		}
+		return paths;
+	}
+
+	/**
+	 * @return the given path of the mapping with the API version put into the version path segment,
 	 * or the unchanged path if the mapping is not versioned or the version path segment is unknown
 	 */
-	public static String versionedPath(String path, LiveRequestMapping mapping, SpringProcessLiveData liveData, Integer configuredIndex) {
+	public String getVersionedPath(String path) {
 		String version = mapping.getApiVersion();
-		if (version == null) {
+		if (path == null || version == null) {
 			return path;
 		}
-		Integer liveIndex = fromLiveData(liveData);
-		return insertVersion(path, version, liveIndex != null ? liveIndex : configuredIndex);
+		Integer index = getPathSegmentIndex();
+		if (index == null) {
+			return path;
+		}
+		return insertVersion(path, version, index);
+	}
+
+	private Integer getPathSegmentIndex() {
+		if (!pathSegmentIndexComputed) {
+			Integer liveIndex = indexFromLiveData();
+			pathSegmentIndex = liveIndex != null ? liveIndex : indexFromWebConfigs();
+			pathSegmentIndexComputed = true;
+		}
+		return pathSegmentIndex;
 	}
 
 	/**
 	 * @return the path segment index from the properties of the running app, <code>null</code> if not
 	 * configured via properties or not readable (e.g. values sanitized by the env endpoint)
 	 */
-	public static Integer fromLiveData(SpringProcessLiveData liveData) {
+	private Integer indexFromLiveData() {
 		LiveProperties liveProperties = liveData == null ? null : liveData.getLiveProperties();
 		if (liveProperties == null) {
 			return null;
@@ -77,10 +123,10 @@ public class ApiVersionPathSegment {
 	}
 
 	/**
-	 * @return the path segment index configured in the given web configs, <code>null</code> if none
+	 * @return the path segment index configured in the web configs, <code>null</code> if none
 	 * or if different indices are configured
 	 */
-	public static Integer fromWebConfigs(Collection<WebConfigIndexElement> webConfigs) {
+	private Integer indexFromWebConfigs() {
 		Set<Integer> indices = new HashSet<>();
 		for (WebConfigIndexElement webConfig : webConfigs) {
 			for (String strategy : webConfig.getVersionSupportStrategies()) {
@@ -100,10 +146,7 @@ public class ApiVersionPathSegment {
 	 * <code>org.springframework.web.accept.PathApiVersionResolver</code> does, i.e. within the application path)
 	 * with the version, but only if that segment is a URI variable.
 	 */
-	public static String insertVersion(String path, String version, Integer index) {
-		if (path == null || version == null || index == null || index < 0) {
-			return path;
-		}
+	private static String insertVersion(String path, String version, int index) {
 		String[] segments = path.split("/", -1);
 		int segmentIndex = 0;
 		for (int i = 0; i < segments.length; i++) {

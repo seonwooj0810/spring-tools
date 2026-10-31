@@ -216,10 +216,10 @@ public class RequestMappingHoverProvider implements HoverProvider {
 		// multiple routes can result in the same URL (e.g. same path, but different accept headers)
 		Set<Tuple2<SpringProcessLiveData, String>> seenUrls = new HashSet<>();
 
-		Integer apiVersionPathSegment = getConfiguredApiVersionPathSegment(data, project);
+		Collection<WebConfigIndexElement> webConfigs = getProjectWebConfigs(data, project);
 
 		for (Tuple2<LiveRequestMapping, SpringProcessLiveData> dataEntry : data) {
-			for (Tuple2<String, String> urlWithPath : getUrlsWithPath(dataEntry, apiVersionPathSegment)) {
+			for (Tuple2<String, String> urlWithPath : getUrlsWithPath(dataEntry, webConfigs)) {
 				if (!seenUrls.add(Tuples.of(dataEntry.getT2(), urlWithPath.getT1()))) {
 					continue;
 				}
@@ -318,25 +318,25 @@ public class RequestMappingHoverProvider implements HoverProvider {
 	}
 
 	/**
-	 * The index of the path segment that holds the API version, as configured in the project (web configs and properties).
+	 * The web configs of the project (from java config and properties), needed for the API version path segment.
 	 * Only looked up if any of the live mappings is versioned at all.
 	 */
-	private Integer getConfiguredApiVersionPathSegment(List<Tuple2<LiveRequestMapping, SpringProcessLiveData>> mappings, IJavaProject project) {
+	private Collection<WebConfigIndexElement> getProjectWebConfigs(List<Tuple2<LiveRequestMapping, SpringProcessLiveData>> mappings, IJavaProject project) {
 		if (project == null || mappings.stream().noneMatch(mapping -> mapping.getT1().getApiVersion() != null)) {
-			return null;
+			return List.of();
 		}
 		try {
 			List<WebConfigIndexElement> webConfigs = new ArrayList<>(springIndex.getNodesOfType(project.getElementName(), WebConfigIndexElement.class));
 			webConfigs.addAll(new WebConfigPropertiesIndexer().findWebConfigFromProperties(project));
-			return ApiVersionPathSegment.fromWebConfigs(webConfigs);
+			return webConfigs;
 		}
 		catch (Exception e) {
 			log.error("", e);
-			return null;
+			return List.of();
 		}
 	}
 
-	private List<Tuple2<String, String>> getUrlsWithPath(Tuple2<LiveRequestMapping, SpringProcessLiveData> mappingMethod, Integer apiVersionPathSegment) {
+	private List<Tuple2<String, String>> getUrlsWithPath(Tuple2<LiveRequestMapping, SpringProcessLiveData> mappingMethod, Collection<WebConfigIndexElement> webConfigs) {
 		List<Tuple2<String, String>> urls = new ArrayList<>();
 		SpringProcessLiveData liveData = mappingMethod.getT2();
 		String contextPath = liveData.getContextPath();
@@ -345,18 +345,9 @@ public class RequestMappingHoverProvider implements HoverProvider {
 		String port = liveData.getPort();
 		String host = liveData.getHost();
 
-		LiveRequestMapping requestMapping = mappingMethod.getT1();
-		String[] paths = requestMapping.getSplitPath();
-		if (paths == null || paths.length == 0) {
-			//Technically, this means the path 'predicate' is unconstrained, meaning any path matches.
-			//So this is not quite the same as the case where path=""... but...
-			//It is better for us to show one link where any path is allowed, versus showing no links where any link is allowed.
-			//So we'll pretend this is the same as path="" as that gives a working link.
-			paths = new String[] {""};
-		}
-		for (String path : paths) {
-			String versionedPath = ApiVersionPathSegment.versionedPath(path, requestMapping, liveData, apiVersionPathSegment);
-			String url = UrlUtil.createUrl(urlScheme, host, port, versionedPath, contextPath);
+		VersionedPaths versionedPaths = new VersionedPaths(mappingMethod.getT1(), liveData, webConfigs);
+		for (String path : versionedPaths.getSplitPath()) {
+			String url = UrlUtil.createUrl(urlScheme, host, port, versionedPaths.getVersionedPath(path), contextPath);
 			if (url != null) {
 				urls.add(Tuples.of(url, path));
 			}
@@ -372,7 +363,7 @@ public class RequestMappingHoverProvider implements HoverProvider {
 		// together with the process information shown only once, at the end of the process section
 		Set<String> seenUrlsOfProcess = new HashSet<>();
 
-		Integer apiVersionPathSegment = getConfiguredApiVersionPathSegment(mappingMethods, project);
+		Collection<WebConfigIndexElement> webConfigs = getProjectWebConfigs(mappingMethods, project);
 
 		for (int i = 0; i < mappingMethods.size(); i++) {
 			Tuple2<LiveRequestMapping, SpringProcessLiveData> mappingMethod = mappingMethods.get(i);
@@ -390,17 +381,10 @@ public class RequestMappingHoverProvider implements HoverProvider {
 				seenUrlsOfProcess.clear();
 			}
 
-			String[] paths = requestMapping.getSplitPath();
-			if (paths == null || paths.length == 0) {
-				//Technically, this means the path 'predicate' is unconstrained, meaning any path matches.
-				//So this is not quite the same as the case where path=""... but...
-				//It is better for us to show one link where any path is allowed, versus showing no links where any link is allowed.
-				//So we'll pretend this is the same as path="" as that gives a working link.
-				paths = new String[] {""};
-			}
+			VersionedPaths versionedPaths = new VersionedPaths(requestMapping, liveData, webConfigs);
 			String contextPath = liveData.getContextPath();
-			List<Renderable> renderableUrls = Arrays.stream(paths)
-					.map(path -> ApiVersionPathSegment.versionedPath(path, requestMapping, liveData, apiVersionPathSegment))
+			List<Renderable> renderableUrls = Arrays.stream(versionedPaths.getSplitPath())
+					.map(versionedPaths::getVersionedPath)
 					.map(path -> UrlUtil.createUrl(urlScheme, host, port, path, contextPath))
 					.filter(url -> seenUrlsOfProcess.add(url))
 					.flatMap(url -> {
